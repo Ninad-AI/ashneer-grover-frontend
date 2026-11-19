@@ -10,7 +10,7 @@ import Aurora from "../components/ui/Aurora";
 type FlowState = "idle" | "active";
 type CallPhase = "connecting" | "listening" | "speaking";
 
-const SESSION_DURATION_SECONDS = 30 * 60;
+const SESSION_DURATION_SECONDS = 10 * 60;
 const WEBSOCKET_PATH = "/ws/audio/ashneer-grover";
 const MAX_RECONNECT_ATTEMPTS = 3;
 
