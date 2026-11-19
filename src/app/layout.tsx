@@ -13,9 +13,9 @@ const playfair = Playfair_Display({
 });
 
 export const metadata: Metadata = {
-  title: "Anupam Mittal — Voice Chat",
+  title: "Ashneer Grover — Voice Chat",
   description:
-    "Premium interactive voice chat experience with Anupam Mittal, Entrepreneur and Investor. Start a live session now.",
+    "Premium interactive voice chat experience with Ashneer Grover, Entrepreneur and Investor. Start a live session now.",
 };
 
 export default function RootLayout({

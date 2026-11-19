@@ -3,18 +3,20 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Image from "next/image";
 import { startStreamingMic, type StreamingMicHandle } from "./utils/audioUtils";
+import { buildBackendWebSocketUrl } from "./utils/backendUrl";
 import VoiceSessionUI from "../components/VoiceSessionUI";
 import Aurora from "../components/ui/Aurora";
 
 type FlowState = "idle" | "active";
 type CallPhase = "connecting" | "listening" | "speaking";
 
-const WS_URL = process.env.NEXT_PUBLIC_BACKEND_WS_URL || "ws://localhost:8000/ws/audio/anupam";
 const SESSION_DURATION_SECONDS = 30 * 60;
+const WEBSOCKET_PATH = "/ws/audio/ashneer-grover";
+const MAX_RECONNECT_ATTEMPTS = 3;
 
 const CREATOR = {
-  name: "Anupam Mittal",
-  image: "/anupam.jpg",
+  name: "Ashneer Grover",
+  image: "/ashneer.jpg",
   role: "Entrepreneur and Investor",
 };
 
@@ -24,6 +26,8 @@ export default function Home() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [callPhase, setCallPhase] = useState<CallPhase>("connecting");
   const [isVisible, setIsVisible] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [sessionKey, setSessionKey] = useState(0);
 
   const mousePosRef = useRef({ x: 0, y: 0 });
   const mouseTargetRef = useRef({ x: 0, y: 0 });
@@ -283,8 +287,20 @@ export default function Home() {
       if (captureAllowedRef.current && !ttsActiveRef.current) {
         setCallPhase("listening");
       }
-    } catch {
-      // mic start failed
+    } catch (error: unknown) {
+      if (activeSessionRef.current && wsRef.current === ws) {
+        const denied = error instanceof DOMException &&
+          (error.name === "NotAllowedError" || error.name === "PermissionDeniedError");
+        setSessionError(
+          denied
+            ? "Allow microphone access in your browser, then try again."
+            : "The microphone could not be started. Check your audio device and try again.",
+        );
+        activeSessionRef.current = false;
+        captureAllowedRef.current = false;
+        stopPlaybackImmediately();
+        ws.close();
+      }
     } finally {
       micStartInFlightRef.current = false;
     }
@@ -301,99 +317,154 @@ export default function Home() {
     micStartInFlightRef.current = false;
     ttsActiveRef.current = false;
 
-    const ws = new WebSocket(WS_URL);
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
+    let disposed = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let stableConnectionTimer: ReturnType<typeof setTimeout> | null = null;
 
-    ws.onopen = () => {
-      setCallPhase("connecting");
-      void maybeStartMicCapture();
+    const showConnectionError = () => {
+      setSessionError("Could not connect to Ashneer Grover. Check your connection and try again.");
+      stopMicCapture();
+      stopPlaybackImmediately();
     };
 
-    ws.onmessage = (event: MessageEvent) => {
-      if (event.data instanceof ArrayBuffer) {
-        if (ttsActiveRef.current && activePlaybackGenerationRef.current !== null) {
-          processBinaryChunk(event.data);
-        }
+    const scheduleReconnect = () => {
+      if (disposed || !activeSessionRef.current) return;
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        showConnectionError();
         return;
       }
 
-      // JSON control messages from the backend control protocol.
+      const delayMs = 1000 * 2 ** reconnectAttempts;
+      reconnectAttempts += 1;
+      setCallPhase("connecting");
+      reconnectTimer = setTimeout(connect, delayMs);
+    };
+
+    const connect = () => {
+      if (disposed || !activeSessionRef.current) return;
+
+      let ws: WebSocket;
       try {
-        const msg = JSON.parse(event.data as string);
-        switch (msg.type) {
-          case "capture_pause":
-            captureAllowedRef.current = false;
-            break;
-          case "capture_resume":
-            captureAllowedRef.current = true;
-            void maybeStartMicCapture();
-            if (!ttsActiveRef.current) {
-              setCallPhase("listening");
-            }
-            break;
-          case "tts_start": {
-            if (msg?.encoding && msg.encoding !== "pcm_s16le") {
-              break;
-            }
-            if (typeof msg?.channels === "number" && msg.channels !== 1) {
-              break;
-            }
-
-            const sampleRate = Number(msg?.sample_rate);
-            playbackSampleRateRef.current = Number.isFinite(sampleRate) && sampleRate > 0
-              ? sampleRate
-              : 16000;
-            beginTtsPlayback();
-            break;
-          }
-          case "tts_end": {
-            const generation = activePlaybackGenerationRef.current;
-            if (generation === null) break;
-
-            pendingPlaybackEndRef.current = true;
-            if (activePlaybackNodesRef.current.length === 0) {
-              finalizePlaybackIfDrained(generation);
-            }
-            break;
-          }
-          case "tts_stop":
-            stopPlaybackImmediately();
-            setCallPhase("listening");
-            void maybeStartMicCapture();
-            break;
-        }
+        ws = new WebSocket(buildBackendWebSocketUrl(WEBSOCKET_PATH, window.location.protocol));
       } catch {
-        /* ignore non-JSON */
+        scheduleReconnect();
+        return;
       }
+
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (disposed) {
+          ws.close();
+          return;
+        }
+        setSessionError(null);
+        setCallPhase("connecting");
+        if (stableConnectionTimer) clearTimeout(stableConnectionTimer);
+        stableConnectionTimer = setTimeout(() => {
+          reconnectAttempts = 0;
+        }, 10_000);
+        void maybeStartMicCapture();
+      };
+
+      ws.onmessage = (event: MessageEvent) => {
+        if (event.data instanceof ArrayBuffer) {
+          if (ttsActiveRef.current && activePlaybackGenerationRef.current !== null) {
+            processBinaryChunk(event.data);
+          }
+          return;
+        }
+
+        // Keep the existing audio protocol: JSON control events plus PCM16 binary chunks.
+        try {
+          const msg = JSON.parse(event.data as string);
+          switch (msg.type) {
+            case "capture_pause":
+              captureAllowedRef.current = false;
+              break;
+            case "capture_resume":
+              captureAllowedRef.current = true;
+              void maybeStartMicCapture();
+              if (!ttsActiveRef.current) {
+                setCallPhase("listening");
+              }
+              break;
+            case "tts_start": {
+              if (msg?.encoding && msg.encoding !== "pcm_s16le") {
+                break;
+              }
+              if (typeof msg?.channels === "number" && msg.channels !== 1) {
+                break;
+              }
+
+              const sampleRate = Number(msg?.sample_rate);
+              playbackSampleRateRef.current = Number.isFinite(sampleRate) && sampleRate > 0
+                ? sampleRate
+                : 16000;
+              beginTtsPlayback();
+              break;
+            }
+            case "tts_end": {
+              const generation = activePlaybackGenerationRef.current;
+              if (generation === null) break;
+
+              pendingPlaybackEndRef.current = true;
+              if (activePlaybackNodesRef.current.length === 0) {
+                finalizePlaybackIfDrained(generation);
+              }
+              break;
+            }
+            case "tts_stop":
+              stopPlaybackImmediately();
+              setCallPhase("listening");
+              void maybeStartMicCapture();
+              break;
+          }
+        } catch {
+          /* Ignore non-JSON control data. */
+        }
+      };
+
+      ws.onerror = () => {
+        setCallPhase("connecting");
+        ws.close();
+      };
+
+      ws.onclose = () => {
+        if (stableConnectionTimer) {
+          clearTimeout(stableConnectionTimer);
+          stableConnectionTimer = null;
+        }
+        captureAllowedRef.current = false;
+        micStartInFlightRef.current = false;
+        if (wsRef.current === ws) wsRef.current = null;
+        setCallPhase("connecting");
+        stopMicCapture();
+        stopPlaybackImmediately();
+        closeAudioContext();
+        scheduleReconnect();
+      };
     };
 
-    ws.onerror = () => {
-      setCallPhase("connecting");
-    };
-
-    ws.onclose = () => {
-      activeSessionRef.current = false;
-      captureAllowedRef.current = false;
-      micStartInFlightRef.current = false;
-      wsRef.current = null;
-      setCallPhase("connecting");
-      stopMicCapture();
-      stopPlaybackImmediately();
-      closeAudioContext();
-    };
+    connect();
 
     return () => {
       // Cleanup on flowState change / unmount
-    activeSessionRef.current = false;
-    captureAllowedRef.current = false;
-    micStartInFlightRef.current = false;
-    ttsActiveRef.current = false;
+      disposed = true;
+      activeSessionRef.current = false;
+      captureAllowedRef.current = false;
+      micStartInFlightRef.current = false;
+      ttsActiveRef.current = false;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (stableConnectionTimer) clearTimeout(stableConnectionTimer);
       if (micControllerRef.current) {
         micControllerRef.current.stop();
         micControllerRef.current = null;
       }
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      const ws = wsRef.current;
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         ws.close();
       }
       wsRef.current = null;
@@ -409,13 +480,22 @@ export default function Home() {
     flowState,
     maybeStartMicCapture,
     processBinaryChunk,
+    sessionKey,
     stopMicCapture,
     stopPlaybackImmediately,
   ]);
 
   const handleStartSession = () => {
+    setSessionError(null);
+    setSessionKey((current) => current + 1);
     setTimeLeft(SESSION_DURATION_SECONDS);
     setFlowState("active");
+  };
+
+  const handleRetrySession = () => {
+    setSessionError(null);
+    setSessionKey((current) => current + 1);
+    setTimeLeft(SESSION_DURATION_SECONDS);
   };
 
   const handleEndCall = useCallback(() => {
@@ -440,6 +520,7 @@ export default function Home() {
 
     setFlowState("idle");
     setTimeLeft(0);
+    setSessionError(null);
     setCallPhase("connecting");
   }, [closeAudioContext, stopMicCapture, stopPlaybackImmediately]);
 
@@ -490,6 +571,8 @@ export default function Home() {
             timeLeft={timeLeft}
             totalTime={SESSION_DURATION_SECONDS}
             onEndCall={handleEndCall}
+            onRetry={handleRetrySession}
+            errorMessage={sessionError}
             creatorName={CREATOR.name}
             creatorImage={CREATOR.image}
           />
@@ -535,14 +618,20 @@ export default function Home() {
                 className="relative w-full h-full overflow-hidden shadow-2xl hover:scale-[1.02] transition-transform duration-700 will-change-transform"
                 style={{ borderRadius: "30% 70% 70% 30% / 30% 30% 70% 70%" }}
               >
-                <Image
-                  src={CREATOR.image}
-                  alt={CREATOR.name}
-                  fill
-                  sizes="(min-width: 768px) 500px, (min-width: 640px) 300px, (min-width: 475px) 240px, 200px"
-                  className="object-cover scale-110"
-                  priority
-                />
+                {CREATOR.image ? (
+                  <Image
+                    src={CREATOR.image}
+                    alt={CREATOR.name}
+                    fill
+                    sizes="(min-width: 768px) 500px, (min-width: 640px) 300px, (min-width: 475px) 240px, 200px"
+                    className="object-cover scale-110"
+                    priority
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center bg-linear-to-br from-rose-500/70 via-indigo-500/60 to-slate-950 text-6xl font-black tracking-tight text-white/90 md:text-8xl">
+                    AG
+                  </div>
+                )}
                 <div className="absolute inset-0 bg-linear-to-t from-black/50 via-transparent to-transparent opacity-60" />
               </div>
 

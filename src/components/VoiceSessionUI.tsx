@@ -9,6 +9,8 @@ interface VoiceSessionUIProps {
     timeLeft: number;
     totalTime: number;
     onEndCall: () => void;
+    onRetry: () => void;
+    errorMessage: string | null;
     creatorName: string;
     creatorImage: string;
 }
@@ -19,6 +21,8 @@ export default function VoiceSessionUI({
     timeLeft,
     totalTime,
     onEndCall,
+    onRetry,
+    errorMessage,
     creatorName,
     creatorImage,
 }: VoiceSessionUIProps) {
@@ -113,14 +117,20 @@ export default function VoiceSessionUI({
                         className="relative overflow-hidden rounded-full border-2 border-white/10 bg-slate-900 shadow-[0_0_50px_rgba(0,0,0,0.5)]"
                         style={{ width: IMG_SIZE, height: IMG_SIZE }}
                     >
-                        <Image
-                            src={creatorImage}
-                            alt={creatorName}
-                            fill
-                            sizes={`${IMG_SIZE}px`}
-                            className="object-cover"
-                            priority
-                        />
+                        {creatorImage ? (
+                            <Image
+                                src={creatorImage}
+                                alt={creatorName}
+                                fill
+                                sizes={`${IMG_SIZE}px`}
+                                className="object-cover"
+                                priority
+                            />
+                        ) : (
+                            <div className="flex h-full w-full items-center justify-center bg-linear-to-br from-rose-500/70 via-indigo-500/60 to-slate-950 text-5xl font-black tracking-tight text-white/90">
+                                AG
+                            </div>
+                        )}
                         {/* Speaking overlay */}
                         <div
                             className={`absolute inset-0 bg-rose-500/20 transition-opacity duration-700 ${isSpeaking ? 'opacity-30' : 'opacity-0'}`}
@@ -148,6 +158,21 @@ export default function VoiceSessionUI({
                     </div>
                 </div>
             </div>
+            {errorMessage && (
+                <div
+                    role="alert"
+                    className="fixed bottom-6 left-1/2 z-100 flex w-[calc(100%-2rem)] max-w-md -translate-x-1/2 items-center justify-between gap-4 rounded-2xl border border-rose-300/20 bg-black/80 px-5 py-4 text-sm text-white shadow-2xl backdrop-blur-xl"
+                >
+                    <span>{errorMessage}</span>
+                    <button
+                        type="button"
+                        onClick={onRetry}
+                        className="shrink-0 rounded-full bg-white px-4 py-2 text-xs font-bold text-black transition hover:bg-rose-100"
+                    >
+                        Try again
+                    </button>
+                </div>
+            )}
         </Ripple>
     );
 }
